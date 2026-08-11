@@ -26,9 +26,11 @@
 #
 # Config (env, with safe defaults):
 #   CLAUDISH_ENABLED   1|0            master switch shared with the display hook (default 1)
-#   CLAUDISH_BACKEND   ollama|claude  rewrite engine (default ollama); claude = headless
-#                                     `claude -p` (no ollama needed, costs Claude usage)
+#   CLAUDISH_BACKEND   ollama|claude|gemini  rewrite engine (default ollama); claude =
+#                                     headless `claude -p`, gemini = headless `gemini`
+#                                     CLI (no ollama needed, costs API/CLI usage)
 #   CLAUDISH_CLAUDE_MODEL <model>     claude backend only: model for `claude -p`
+#   CLAUDISH_GEMINI_MODEL <model>     gemini backend only (default gemini-3.6-flash)
 #   CLAUDISH_MD_DIR    <path>         REQUIRED opt-in. Only .md under here is rewritten.
 #                                     Relative paths resolve against the tool's cwd.
 #   CLAUDISH_MD_MODE   sibling|overwrite   (default sibling)
@@ -89,6 +91,8 @@ canon() (
 command -v jq   >/dev/null 2>&1 || pass_through "no jq"
 if [ "$BACKEND" = "claude" ]; then
   command -v claude >/dev/null 2>&1 || pass_through "no claude CLI"
+elif [ "$BACKEND" = "gemini" ]; then
+  command -v gemini >/dev/null 2>&1 || pass_through "no gemini CLI"
 else
   command -v curl >/dev/null 2>&1 || pass_through "no curl"
 fi
@@ -181,6 +185,17 @@ else
       $tmo claude "${cc_args[@]}" 2>/dev/null)"
     curl_rc=$?
     dbg "claude backend rc=$curl_rc model=${cc_model:-default} rewrite_bytes=${#rewrite}"
+  elif [ "$BACKEND" = "gemini" ]; then
+    # Headless Gemini CLI; no system-prompt flag, so instructions + body are
+    # combined into one stdin prompt. Auth: CLI login or GEMINI_API_KEY.
+    gm_model="${CLAUDISH_GEMINI_MODEL:-gemini-3.6-flash}"
+    tmo=""
+    if command -v timeout >/dev/null 2>&1; then tmo="timeout $LLM_TIMEOUT"
+    elif command -v gtimeout >/dev/null 2>&1; then tmo="gtimeout $LLM_TIMEOUT"; fi
+    rewrite="$({ printf '%s' "$sys"; printf '\n\nThe Markdown to rewrite is below the line. Output only its rewrite.\n\n---\n\n'; printf '%s' "$body"; } \
+      | $tmo gemini -m "$gm_model" 2>/dev/null)"
+    curl_rc=$?
+    dbg "gemini backend rc=$curl_rc model=$gm_model rewrite_bytes=${#rewrite}"
   else
     req="$(jq -n --arg m "$MODEL" --arg s "$sys" --arg u "$body" \
           '{model:$m,stream:false,think:false,options:{temperature:0.3},messages:[{role:"system",content:$s},{role:"user",content:$u}]}' 2>/dev/null)"
@@ -208,6 +223,12 @@ if [ -z "$rewrite" ]; then
         why="\`claude -p\` rewrite of $(basename "$file") timed out after ${LLM_TIMEOUT}s — raise CLAUDISH_MD_TIMEOUT (and the PostToolUse hook timeout in hooks.json). File left unchanged."
       elif [ "$curl_rc" != "0" ]; then
         why="\`claude -p\` failed (exit $curl_rc) while rewriting Markdown — file left unchanged. Try \`claude -p 'hi'\` in a terminal to check the CLI."
+      fi
+    elif [ "$BACKEND" = "gemini" ]; then
+      if [ "$curl_rc" = "124" ]; then
+        why="\`gemini\` rewrite of $(basename "$file") timed out after ${LLM_TIMEOUT}s — raise CLAUDISH_MD_TIMEOUT (and the PostToolUse hook timeout in hooks.json). File left unchanged."
+      elif [ "$curl_rc" != "0" ]; then
+        why="\`gemini\` failed (exit $curl_rc) while rewriting Markdown — file left unchanged. Try \`echo hi | gemini -m ${CLAUDISH_GEMINI_MODEL:-gemini-3.6-flash}\` in a terminal to check the CLI, model name, and auth."
       fi
     elif [ "$curl_rc" = "28" ]; then
       why="rewrite of $(basename "$file") timed out after ${LLM_TIMEOUT}s — the model is too slow for a file this size. Raise CLAUDISH_MD_TIMEOUT (and the PostToolUse hook timeout in hooks.json), or set CLAUDISH_MODEL to a smaller model. File left unchanged."

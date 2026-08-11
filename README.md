@@ -5,14 +5,19 @@ message, produced by a **local LLM via ollama**. It is **display-only**: Claude'
 own reasoning and the saved transcript keep the original text — only what you
 read on screen changes.
 
-> **This fork adds a `claude` backend.** Set `CLAUDISH_BACKEND=claude` and the
-> rewrite is produced by headless Claude Code (`claude -p`) instead of ollama —
-> no local model needed. The model defaults to your session's/CLI's current
-> model; override with `CLAUDISH_CLAUDE_MODEL`. Each rewrite is a normal Claude
-> API/subscription call (so it costs usage, and the message text goes to
-> Anthropic — which it already did, being a Claude reply). A recursion guard
-> (`CLAUDISH_IN_REWRITE`) keeps the child session's own hooks inert. With this
-> backend the ollama/jq/curl requirements below don't apply (only `jq`).
+> **This fork adds `claude` and `gemini` backends.** Neither needs ollama or a
+> local model; both cost normal API/CLI usage.
+>
+> - `CLAUDISH_BACKEND=claude` — rewrite via headless Claude Code (`claude -p`).
+>   Model defaults to your session's/CLI's current model; override with
+>   `CLAUDISH_CLAUDE_MODEL`. A recursion guard (`CLAUDISH_IN_REWRITE`) keeps the
+>   child session's own hooks inert.
+> - `CLAUDISH_BACKEND=gemini` — rewrite via the [Gemini CLI](https://github.com/google-gemini/gemini-cli)
+>   (`gemini`), authenticated by its own login or `GEMINI_API_KEY`. Model
+>   defaults to `gemini-3.6-flash`; override with `CLAUDISH_GEMINI_MODEL`.
+>   Note: your message text is sent to Google.
+>
+> With these backends the ollama/curl requirements below don't apply (only `jq`).
 
 An optional second hook rewrites **Markdown files** into plain English when they
 are written or edited (opt-in, off by default).
@@ -207,7 +212,8 @@ frontmatter, so the frontmatter stays on line 1 where parsers expect it.
 | Var | Default | Meaning |
 |---|---|---|
 | `CLAUDISH_ENABLED` | `1` | Master switch. `0` = pass everything through. |
-| `CLAUDISH_BACKEND` | `ollama` | `ollama` or `claude`. `claude` = rewrite via headless `claude -p` (no ollama needed; costs normal Claude usage). |
+| `CLAUDISH_BACKEND` | `ollama` | `ollama`, `claude`, or `gemini`. `claude` = headless `claude -p`; `gemini` = headless Gemini CLI. Neither needs ollama; both cost normal usage. |
+| `CLAUDISH_GEMINI_MODEL` | `gemini-3.6-flash` | `gemini` backend only: model passed to the Gemini CLI (`-m`). |
 | `CLAUDISH_CLAUDE_MODEL` | *(unset)* | `claude` backend only: model passed to `claude -p`. Unset = the session's model if the hook payload carries one, else your CLI default. |
 | `CLAUDISH_MODE` | `append` | `append` or `replace` (display hook). |
 | `CLAUDISH_MODEL` | `gemma4:26b-mlx` | ollama model name. |

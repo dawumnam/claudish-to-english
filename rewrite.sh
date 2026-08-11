@@ -27,12 +27,16 @@
 # Config (all via env, with safe defaults):
 #   CLAUDISH_ENABLED   1|0            master switch (default 1)
 #   CLAUDISH_MODE      append|replace display strategy (default append)
-#   CLAUDISH_BACKEND   ollama|claude  rewrite engine (default ollama).
+#   CLAUDISH_BACKEND   ollama|claude|gemini  rewrite engine (default ollama).
 #                                           claude = headless `claude -p` (no ollama
 #                                           needed; costs normal Claude usage)
+#                                           gemini = headless `gemini` CLI (needs the
+#                                           CLI on PATH and Google auth/API key)
 #   CLAUDISH_CLAUDE_MODEL <model>     claude backend only: model for `claude -p`.
 #                                           Unset = the payload's session model if
 #                                           present, else your CLI default model.
+#   CLAUDISH_GEMINI_MODEL <model>     gemini backend only: model for the gemini CLI
+#                                           (default gemini-3.6-flash)
 #   CLAUDISH_MODEL     <ollama model> (default gemma4:26b-mlx)
 #   CLAUDISH_OLLAMA    <base url>     (default http://localhost:11434)
 #   CLAUDISH_MIN_CHARS <n>            skip messages shorter than this
@@ -95,6 +99,8 @@ emit_empty() {
 command -v jq  >/dev/null 2>&1 || pass_through
 if [ "$BACKEND" = "claude" ]; then
   command -v claude >/dev/null 2>&1 || pass_through
+elif [ "$BACKEND" = "gemini" ]; then
+  command -v gemini >/dev/null 2>&1 || pass_through
 else
   command -v curl >/dev/null 2>&1 || pass_through
 fi
@@ -193,6 +199,18 @@ else
       $tmo claude "${cc_args[@]}" 2>/dev/null)"
     curl_rc=$?
     dbg "claude backend rc=$curl_rc model=${cc_model:-default} rewrite_bytes=${#rewrite}"
+  elif [ "$BACKEND" = "gemini" ]; then
+    # Headless Gemini CLI as the rewriter. It has no system-prompt flag, so the
+    # instructions and the message are combined into one stdin prompt. Auth
+    # comes from the CLI's own login or GEMINI_API_KEY in the environment.
+    gm_model="${CLAUDISH_GEMINI_MODEL:-gemini-3.6-flash}"
+    tmo=""
+    if command -v timeout >/dev/null 2>&1; then tmo="timeout $LLM_TIMEOUT"
+    elif command -v gtimeout >/dev/null 2>&1; then tmo="gtimeout $LLM_TIMEOUT"; fi
+    rewrite="$({ printf '%s' "$sys"; printf '\n\nThe assistant message to rewrite is below the line. Output only its rewrite.\n\n---\n\n'; printf '%s' "$full"; } \
+      | $tmo gemini -m "$gm_model" 2>/dev/null)"
+    curl_rc=$?
+    dbg "gemini backend rc=$curl_rc model=$gm_model rewrite_bytes=${#rewrite}"
   else
     req="$(jq -n --arg m "$MODEL" --arg s "$sys" --arg u "$full" \
           '{model:$m,stream:false,think:false,options:{temperature:0.3},messages:[{role:"system",content:$s},{role:"user",content:$u}]}' 2>/dev/null)"
@@ -226,6 +244,12 @@ if [ -z "$rewrite" ]; then
         why="the \`claude -p\` rewrite timed out after ${LLM_TIMEOUT}s — raise CLAUDISH_TIMEOUT (and the MessageDisplay timeout in hooks.json)"
       else
         why="\`claude -p\` failed (exit $curl_rc) — try \`claude -p 'hi'\` in a terminal to check the CLI works and you're logged in"
+      fi
+    elif [ "$BACKEND" = "gemini" ]; then
+      if [ "$curl_rc" = "124" ]; then
+        why="the \`gemini\` rewrite timed out after ${LLM_TIMEOUT}s — raise CLAUDISH_TIMEOUT (and the MessageDisplay timeout in hooks.json)"
+      else
+        why="\`gemini\` failed (exit $curl_rc) — try \`echo hi | gemini -m ${CLAUDISH_GEMINI_MODEL:-gemini-3.6-flash}\` in a terminal to check the CLI, model name, and auth"
       fi
     elif [ "$curl_rc" = "28" ]; then
       why="the rewrite timed out after ${LLM_TIMEOUT}s (model too slow for this message) — raise CLAUDISH_TIMEOUT or set CLAUDISH_MODEL to a smaller model"
