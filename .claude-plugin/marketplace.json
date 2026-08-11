@@ -1,16 +1,16 @@
 {
-  "name": "gvzdv-plugins",
+  "name": "dawumnam-plugins",
   "owner": {
-    "name": "Mike Gvozdev",
-    "email": "mv.gvozdev@gmail.com",
-    "url": "https://github.com/gvzdv"
+    "name": "Dawum Nam",
+    "email": "dev@interviewbox.co.kr",
+    "url": "https://github.com/dawumnam"
   },
-  "description": "Mike Gvozdev's Claude Code plugins.",
+  "description": "Dawum Nam's Claude Code plugins (fork of gvzdv/claudish-to-english).",
   "plugins": [
     {
       "name": "claudish-to-english",
       "source": "./",
-      "description": "Shows a plain-English rewrite of each Claude Code assistant message, produced by a local LLM (ollama). Display-only.",
+      "description": "Shows a plain-English rewrite of each Claude Code assistant message, produced by a headless CLI model (Gemini CLI or claude -p). Display-only.",
       "category": "productivity"
     }
   ]

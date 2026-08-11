@@ -4,8 +4,9 @@
 #
 # Fires after a Write/Edit and, IF the written file is a Markdown file that
 # lives under CLAUDISH_MD_DIR, rewrites its prose into plain English using a
-# local LLM (ollama). PostToolUse.updatedToolOutput only changes what Claude
-# SEES, not the bytes on disk, so this hook does the file write itself.
+# headless CLI model (gemini or claude). PostToolUse.updatedToolOutput only
+# changes what Claude SEES, not the bytes on disk, so this hook does the file
+# write itself.
 #
 # OPT-IN: does nothing unless CLAUDISH_MD_DIR is set. Only *.md files whose
 # resolved path is inside that directory are touched. Everything else passes
@@ -19,34 +20,31 @@
 # The writes here go through the shell, NOT Claude's Write tool, so they do
 # NOT re-trigger PostToolUse — no loop.
 #
-# FAIL-OPEN CONTRACT: on ANY problem (disabled, no jq/curl, not under the dir,
+# FAIL-OPEN CONTRACT: on ANY problem (disabled, no jq/CLI, not under the dir,
 # not markdown, parse error, LLM down, timeout, empty rewrite) the hook leaves
 # the file exactly as the agent wrote it and exits 0. It never writes a partial
 # or empty rewrite over real content.
 #
 # Config (env, with safe defaults):
 #   CLAUDISH_ENABLED   1|0            master switch shared with the display hook (default 1)
-#   CLAUDISH_BACKEND   ollama|claude|gemini  rewrite engine (default ollama); claude =
-#                                     headless `claude -p`, gemini = headless `gemini`
-#                                     CLI (no ollama needed, costs API/CLI usage)
-#   CLAUDISH_CLAUDE_MODEL <model>     claude backend only: model for `claude -p`
+#   CLAUDISH_BACKEND   gemini|claude  rewrite engine (default gemini); gemini = headless
+#                                     `gemini` CLI, claude = headless `claude -p`
+#                                     (costs API/CLI usage)
 #   CLAUDISH_GEMINI_MODEL <model>     gemini backend only (default gemini-3.6-flash)
+#   CLAUDISH_CLAUDE_MODEL <model>     claude backend only: model for `claude -p`
 #   CLAUDISH_MD_DIR    <path>         REQUIRED opt-in. Only .md under here is rewritten.
 #                                     Relative paths resolve against the tool's cwd.
 #   CLAUDISH_MD_MODE   sibling|overwrite   (default sibling)
 #   CLAUDISH_MD_SUFFIX <word>         sibling infix: NAME.<word>.md (default "plain")
-#   CLAUDISH_MODEL     <ollama model> (default gemma4:26b-mlx)
-#   CLAUDISH_OLLAMA    <base url>     (default http://localhost:11434)
 #   CLAUDISH_MIN_CHARS <n>            skip files whose prose (code stripped) is shorter (default 200)
-#   CLAUDISH_STUB      1|0            deterministic stub instead of ollama (mechanics testing)
+#   CLAUDISH_STUB      1|0            deterministic stub instead of the model (mechanics testing)
 #   CLAUDISH_MD_TIMEOUT <seconds>     LLM client timeout for file rewrites (default 150).
 #                                     Large models rewriting long docs are slow; this is
 #                                     higher than the display hook's timeout on purpose and
 #                                     must stay below the PostToolUse hook timeout in hooks.json.
 #   CLAUDISH_DEBUG     1|0            append a debug log (default 0)
 #   CLAUDISH_NOTICE    1|0            once-per-session systemMessage when a rewrite is
-#                                     skipped because ollama is unreachable, times out,
-#                                     or the model is missing (default 1)
+#                                     skipped because the CLI fails or times out (default 1)
 # ---------------------------------------------------------------------------
 set -uo pipefail
 
@@ -55,12 +53,10 @@ set -uo pipefail
 [ "${CLAUDISH_IN_REWRITE:-0}" = "1" ] && exit 0
 
 ENABLED="${CLAUDISH_ENABLED:-1}"
-BACKEND="${CLAUDISH_BACKEND:-ollama}"
+BACKEND="${CLAUDISH_BACKEND:-gemini}"
 MD_DIR="${CLAUDISH_MD_DIR:-}"
 MD_MODE="${CLAUDISH_MD_MODE:-sibling}"
 MD_SUFFIX="${CLAUDISH_MD_SUFFIX:-plain}"
-MODEL="${CLAUDISH_MODEL:-gemma4:26b-mlx}"
-OLLAMA="${CLAUDISH_OLLAMA:-http://localhost:11434}"
 MIN_CHARS="${CLAUDISH_MIN_CHARS:-200}"
 STUB="${CLAUDISH_STUB:-0}"
 LLM_TIMEOUT="${CLAUDISH_MD_TIMEOUT:-150}"
@@ -91,10 +87,8 @@ canon() (
 command -v jq   >/dev/null 2>&1 || pass_through "no jq"
 if [ "$BACKEND" = "claude" ]; then
   command -v claude >/dev/null 2>&1 || pass_through "no claude CLI"
-elif [ "$BACKEND" = "gemini" ]; then
-  command -v gemini >/dev/null 2>&1 || pass_through "no gemini CLI"
 else
-  command -v curl >/dev/null 2>&1 || pass_through "no curl"
+  command -v gemini >/dev/null 2>&1 || pass_through "no gemini CLI"
 fi
 
 payload="$(cat)"
@@ -185,7 +179,7 @@ else
       $tmo claude "${cc_args[@]}" 2>/dev/null)"
     curl_rc=$?
     dbg "claude backend rc=$curl_rc model=${cc_model:-default} rewrite_bytes=${#rewrite}"
-  elif [ "$BACKEND" = "gemini" ]; then
+  else
     # Headless Gemini CLI; no system-prompt flag, so instructions + body are
     # combined into one stdin prompt. Auth: CLI login or GEMINI_API_KEY.
     gm_model="${CLAUDISH_GEMINI_MODEL:-gemini-3.6-flash}"
@@ -196,24 +190,14 @@ else
       | $tmo gemini -m "$gm_model" 2>/dev/null)"
     curl_rc=$?
     dbg "gemini backend rc=$curl_rc model=$gm_model rewrite_bytes=${#rewrite}"
-  else
-    req="$(jq -n --arg m "$MODEL" --arg s "$sys" --arg u "$body" \
-          '{model:$m,stream:false,think:false,options:{temperature:0.3},messages:[{role:"system",content:$s},{role:"user",content:$u}]}' 2>/dev/null)"
-    [ -n "$req" ] || pass_through "req build failed"
-    resp="$(printf '%s' "$req" | curl -sS --max-time "$LLM_TIMEOUT" \
-            -H 'Content-Type: application/json' -X POST "$OLLAMA/api/chat" -d @- 2>/dev/null)"
-    curl_rc=$?
-    rewrite="$(printf '%s' "$resp" | jq -j '.message.content // empty' 2>/dev/null)"
-    err="$(printf '%s' "$resp" | jq -r '.error // empty' 2>/dev/null)"
-    dbg "ollama curl_rc=$curl_rc resp_bytes=${#resp} rewrite_bytes=${#rewrite} err=${err:-none}"
   fi
 fi
 
 # Empty/failed rewrite -> fail open (file left exactly as the agent wrote it).
-# When the cause is a FIXABLE setup problem (ollama down, timeout, model not
-# pulled), surface a ONE-TIME, per-session systemMessage so the silent skip is
-# not a mystery. A systemMessage does not block the tool and is not fed to
-# Claude as context; the file is still left untouched either way.
+# When the cause is a FIXABLE setup problem (CLI missing/unauthenticated, bad
+# model, timeout), surface a ONE-TIME, per-session systemMessage so the silent
+# skip is not a mystery. A systemMessage does not block the tool and is not fed
+# to Claude as context; the file is still left untouched either way.
 if [ -z "$rewrite" ]; then
   notified="$LOG_ROOT/$SID.md-notified"
   if [ "$NOTICE" = "1" ] && [ ! -e "$notified" ]; then
@@ -224,20 +208,12 @@ if [ -z "$rewrite" ]; then
       elif [ "$curl_rc" != "0" ]; then
         why="\`claude -p\` failed (exit $curl_rc) while rewriting Markdown — file left unchanged. Try \`claude -p 'hi'\` in a terminal to check the CLI."
       fi
-    elif [ "$BACKEND" = "gemini" ]; then
+    else
       if [ "$curl_rc" = "124" ]; then
         why="\`gemini\` rewrite of $(basename "$file") timed out after ${LLM_TIMEOUT}s — raise CLAUDISH_MD_TIMEOUT (and the PostToolUse hook timeout in hooks.json). File left unchanged."
       elif [ "$curl_rc" != "0" ]; then
         why="\`gemini\` failed (exit $curl_rc) while rewriting Markdown — file left unchanged. Try \`echo hi | gemini -m ${CLAUDISH_GEMINI_MODEL:-gemini-3.6-flash}\` in a terminal to check the CLI, model name, and auth."
       fi
-    elif [ "$curl_rc" = "28" ]; then
-      why="rewrite of $(basename "$file") timed out after ${LLM_TIMEOUT}s — the model is too slow for a file this size. Raise CLAUDISH_MD_TIMEOUT (and the PostToolUse hook timeout in hooks.json), or set CLAUDISH_MODEL to a smaller model. File left unchanged."
-    elif [ "$curl_rc" != "0" ]; then
-      why="can't reach ollama at $OLLAMA — Markdown rewrite skipped, file left unchanged. Start it with \`ollama serve\`."
-    elif printf '%s' "${err:-}" | grep -qi 'not found'; then
-      why="ollama model '$MODEL' isn't available — Markdown rewrite skipped, file left unchanged. Pull it with \`ollama pull $MODEL\`, or set CLAUDISH_MODEL to a model you have."
-    elif [ -n "${err:-}" ]; then
-      why="ollama error while rewriting Markdown: $err. File left unchanged."
     fi
     if [ -n "$why" ]; then
       : > "$notified" 2>/dev/null || true

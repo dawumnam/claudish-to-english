@@ -26,29 +26,26 @@
 #
 # Config (all via env, with safe defaults):
 #   CLAUDISH_ENABLED   1|0            master switch (default 1)
-#   CLAUDISH_MODE      append|replace display strategy (default append)
-#   CLAUDISH_BACKEND   ollama|claude|gemini  rewrite engine (default ollama).
-#                                           claude = headless `claude -p` (no ollama
-#                                           needed; costs normal Claude usage)
+#   CLAUDISH_MODE      append|replace display strategy (default replace)
+#   CLAUDISH_BACKEND   gemini|claude  rewrite engine (default gemini).
 #                                           gemini = headless `gemini` CLI (needs the
 #                                           CLI on PATH and Google auth/API key)
+#                                           claude = headless `claude -p` (costs
+#                                           normal Claude usage)
+#   CLAUDISH_GEMINI_MODEL <model>     gemini backend only: model for the gemini CLI
+#                                           (default gemini-3.6-flash)
 #   CLAUDISH_CLAUDE_MODEL <model>     claude backend only: model for `claude -p`.
 #                                           Unset = the payload's session model if
 #                                           present, else your CLI default model.
-#   CLAUDISH_GEMINI_MODEL <model>     gemini backend only: model for the gemini CLI
-#                                           (default gemini-3.6-flash)
-#   CLAUDISH_MODEL     <ollama model> (default gemma4:26b-mlx)
-#   CLAUDISH_OLLAMA    <base url>     (default http://localhost:11434)
 #   CLAUDISH_MIN_CHARS <n>            skip messages shorter than this
 #                                           (prose, code stripped) (default 200)
-#   CLAUDISH_STUB      1|0            deterministic stub instead of ollama
+#   CLAUDISH_STUB      1|0            deterministic stub instead of the model
 #                                           (for display-mechanics testing)
 #   CLAUDISH_TIMEOUT   <seconds>      LLM client timeout (default 45)
 #   CLAUDISH_DEBUG     1|0            write a debug log (default 0)
 #   CLAUDISH_NOTICE    1|0            once-per-session on-screen notice when the
-#                                           rewrite is skipped because ollama is
-#                                           unreachable, times out, or the model
-#                                           is missing (default 1)
+#                                           rewrite is skipped because the CLI
+#                                           fails or times out (default 1)
 # ---------------------------------------------------------------------------
 set -uo pipefail
 
@@ -58,10 +55,8 @@ set -uo pipefail
 [ "${CLAUDISH_IN_REWRITE:-0}" = "1" ] && exit 0
 
 ENABLED="${CLAUDISH_ENABLED:-1}"
-MODE="${CLAUDISH_MODE:-append}"
-BACKEND="${CLAUDISH_BACKEND:-ollama}"
-MODEL="${CLAUDISH_MODEL:-gemma4:26b-mlx}"
-OLLAMA="${CLAUDISH_OLLAMA:-http://localhost:11434}"
+MODE="${CLAUDISH_MODE:-replace}"
+BACKEND="${CLAUDISH_BACKEND:-gemini}"
 MIN_CHARS="${CLAUDISH_MIN_CHARS:-200}"
 STUB="${CLAUDISH_STUB:-0}"
 LLM_TIMEOUT="${CLAUDISH_TIMEOUT:-45}"
@@ -99,10 +94,8 @@ emit_empty() {
 command -v jq  >/dev/null 2>&1 || pass_through
 if [ "$BACKEND" = "claude" ]; then
   command -v claude >/dev/null 2>&1 || pass_through
-elif [ "$BACKEND" = "gemini" ]; then
-  command -v gemini >/dev/null 2>&1 || pass_through
 else
-  command -v curl >/dev/null 2>&1 || pass_through
+  command -v gemini >/dev/null 2>&1 || pass_through
 fi
 
 payload="$(cat)"
@@ -162,7 +155,6 @@ fi
 # ---- obtain the rewrite --------------------------------------------------
 rewrite=""
 curl_rc=0
-err=""
 if [ "$STUB" = "1" ]; then
   nparts="$(ls "$mdir"/*.part 2>/dev/null | wc -l | tr -d ' ')"
   rewrite="STUB-SIMPLIFIED ✦ mode=$MODE chunks=$nparts prose_len=$prose_len ✦ (this text came from the hook, not the model)"
@@ -199,7 +191,7 @@ else
       $tmo claude "${cc_args[@]}" 2>/dev/null)"
     curl_rc=$?
     dbg "claude backend rc=$curl_rc model=${cc_model:-default} rewrite_bytes=${#rewrite}"
-  elif [ "$BACKEND" = "gemini" ]; then
+  else
     # Headless Gemini CLI as the rewriter. It has no system-prompt flag, so the
     # instructions and the message are combined into one stdin prompt. Auth
     # comes from the CLI's own login or GEMINI_API_KEY in the environment.
@@ -211,16 +203,6 @@ else
       | $tmo gemini -m "$gm_model" 2>/dev/null)"
     curl_rc=$?
     dbg "gemini backend rc=$curl_rc model=$gm_model rewrite_bytes=${#rewrite}"
-  else
-    req="$(jq -n --arg m "$MODEL" --arg s "$sys" --arg u "$full" \
-          '{model:$m,stream:false,think:false,options:{temperature:0.3},messages:[{role:"system",content:$s},{role:"user",content:$u}]}' 2>/dev/null)"
-    [ -n "$req" ] || { dbg "req build failed"; cleanup; [ "$MODE" = "replace" ] && { out="$mdir.orig"; printf '%s' "$full" > "$out" && emit "$out"; }; pass_through; }
-    resp="$(printf '%s' "$req" | curl -sS --max-time "$LLM_TIMEOUT" \
-            -H 'Content-Type: application/json' -X POST "$OLLAMA/api/chat" -d @- 2>/dev/null)"
-    curl_rc=$?
-    rewrite="$(printf '%s' "$resp" | jq -j '.message.content // empty' 2>/dev/null)"
-    err="$(printf '%s' "$resp" | jq -r '.error // empty' 2>/dev/null)"
-    dbg "ollama curl_rc=$curl_rc resp_bytes=${#resp} rewrite_bytes=${#rewrite} err=${err:-none}"
   fi
 fi
 
@@ -229,14 +211,12 @@ if [ -z "$rewrite" ]; then
   dbg "empty rewrite -> fail open (curl_rc=$curl_rc)"
 
   # One-time, per-session notice when the cause is a FIXABLE setup problem:
-  # ollama unreachable (curl_rc!=0 — connection refused, timeout, DNS), or
-  # ollama up but returning an error (curl_rc=0 with .error set, e.g. the model
-  # was never pulled). A merely empty completion — ollama up, no error — stays
-  # silent; a notice would be wrong then.
+  # the CLI exited non-zero (not installed, not authed, bad model, timeout).
+  # A merely empty completion with exit 0 stays silent.
   # The notice only APPENDS one line to the original; it never suppresses
   # content, so the fail-open contract still holds.
   notified="$BUF_ROOT/$sid.notified"
-  if [ "$NOTICE" = "1" ] && [ ! -e "$notified" ] && { [ "$curl_rc" != "0" ] || [ -n "${err:-}" ]; }; then
+  if [ "$NOTICE" = "1" ] && [ ! -e "$notified" ] && [ "$curl_rc" != "0" ]; then
     : > "$notified" 2>/dev/null || true
     last_delta="$(cat "$final_part" 2>/dev/null)"
     if [ "$BACKEND" = "claude" ]; then
@@ -245,20 +225,12 @@ if [ -z "$rewrite" ]; then
       else
         why="\`claude -p\` failed (exit $curl_rc) — try \`claude -p 'hi'\` in a terminal to check the CLI works and you're logged in"
       fi
-    elif [ "$BACKEND" = "gemini" ]; then
+    else
       if [ "$curl_rc" = "124" ]; then
         why="the \`gemini\` rewrite timed out after ${LLM_TIMEOUT}s — raise CLAUDISH_TIMEOUT (and the MessageDisplay timeout in hooks.json)"
       else
         why="\`gemini\` failed (exit $curl_rc) — try \`echo hi | gemini -m ${CLAUDISH_GEMINI_MODEL:-gemini-3.6-flash}\` in a terminal to check the CLI, model name, and auth"
       fi
-    elif [ "$curl_rc" = "28" ]; then
-      why="the rewrite timed out after ${LLM_TIMEOUT}s (model too slow for this message) — raise CLAUDISH_TIMEOUT or set CLAUDISH_MODEL to a smaller model"
-    elif [ "$curl_rc" != "0" ]; then
-      why="can't reach ollama at $OLLAMA — start it with \`ollama serve\` (see the plugin README)"
-    elif printf '%s' "${err:-}" | grep -qi 'not found'; then
-      why="ollama model '$MODEL' isn't available — pull it with \`ollama pull $MODEL\`, or set CLAUDISH_MODEL to a model you have"
-    else
-      why="ollama returned an error: ${err:-unknown}"
     fi
     note=$'\n\n────────────────────────\n'"⚠️ claudish-to-english: $why. Showing Claude's original text unchanged. Shown once per session; set CLAUDISH_NOTICE=0 to silence."
     out="$BUF_ROOT/$sid.$mid.notice"

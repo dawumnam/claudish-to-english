@@ -1,81 +1,66 @@
 # claudish-to-english
 
 A Claude Code plugin that shows a **plain-English rewrite** of each assistant
-message, produced by a **local LLM via ollama**. It is **display-only**: Claude's
-own reasoning and the saved transcript keep the original text — only what you
-read on screen changes.
+message, produced by a **headless CLI model** — the
+[Gemini CLI](https://github.com/google-gemini/gemini-cli) by default, or
+headless Claude Code (`claude -p`). It is **display-only**: Claude's own
+reasoning and the saved transcript keep the original text — only what you read
+on screen changes.
 
-> **This fork adds `claude` and `gemini` backends.** Neither needs ollama or a
-> local model; both cost normal API/CLI usage.
->
-> - `CLAUDISH_BACKEND=claude` — rewrite via headless Claude Code (`claude -p`).
->   Model defaults to your session's/CLI's current model; override with
->   `CLAUDISH_CLAUDE_MODEL`. A recursion guard (`CLAUDISH_IN_REWRITE`) keeps the
->   child session's own hooks inert.
-> - `CLAUDISH_BACKEND=gemini` — rewrite via the [Gemini CLI](https://github.com/google-gemini/gemini-cli)
->   (`gemini`), authenticated by its own login or `GEMINI_API_KEY`. Model
->   defaults to `gemini-3.6-flash`; override with `CLAUDISH_GEMINI_MODEL`.
->   Note: your message text is sent to Google.
->
-> With these backends the ollama/curl requirements below don't apply (only `jq`).
+> This is a fork of [gvzdv/claudish-to-english](https://github.com/gvzdv/claudish-to-english).
+> Differences from upstream: the ollama backend is removed, `gemini` (default)
+> and `claude` CLI backends are added, and the display mode defaults to
+> `replace` instead of `append`.
 
 An optional second hook rewrites **Markdown files** into plain English when they
 are written or edited (opt-in, off by default).
 
 > Status: working prototype. Every hook fails **open** — if anything goes wrong
-> (ollama down, timeout, missing dependency), you simply see Claude's original
+> (CLI missing, not authenticated, timeout), you simply see Claude's original
 > text. The plugin can never swallow or corrupt an answer.
 
 ---
 
-## Requirements (read this first)
-
-This plugin shells out to a **local** model. Nothing works until these are in place:
+## Requirements
 
 | Requirement | Why | Install |
 |---|---|---|
-| **ollama**, running | Does the rewriting, locally | `brew install ollama` then `ollama serve` |
-| A pulled model | The actual rewriter | `ollama pull gemma4:26b-mlx` (~17 GB; choose the model that fits into your memory) |
+| `gemini` CLI, authenticated | The default rewriter | `brew install gemini-cli`, then log in or set `GEMINI_API_KEY` |
 | `jq` | Parses hook JSON | ships with macOS; else `brew install jq` |
-| `curl` | Talks to ollama | ships with macOS |
+| `claude` CLI | Only for `CLAUDISH_BACKEND=claude` | you already have it |
 
-Warm the model once after `ollama serve` (the first call is a slow cold load):
+Sanity-check the rewriter once:
 
 ```bash
-ollama run gemma4:26b-mlx "hi"
+echo hi | gemini -m gemini-3.6-flash
 ```
 
-**If the local model isn't ready, the plugin does nothing to your text** —
-Claude's output shows normally, unchanged. That is by design, not a bug. It skips
-(fails open) when ollama is down, the request times out, or the model isn't
-pulled. The first time that happens in a session it tells you why: the display
-hook appends a one-line notice on screen, and the Markdown hook shows a
-`systemMessage`. So a silent skip is never a mystery (once per session; set
-`CLAUDISH_NOTICE=0` to silence it).
+**If the rewriter isn't ready, the plugin does nothing to your text** — Claude's
+output shows normally, unchanged. That is by design, not a bug. The first time a
+rewrite is skipped in a session it tells you why: the display hook shows a
+one-line notice, the Markdown hook a `systemMessage` (once per session; set
+`CLAUDISH_NOTICE=0` to silence).
 
-**Pick a model you actually have.** The default is `gemma4:26b-mlx`. Pull it (as
-above), or pull a smaller/faster model and point the plugin at it by setting
-`CLAUDISH_MODEL` to that model's exact ollama tag in your `env` (see
-[Configuring the plugin](#configuring-the-plugin)). If `CLAUDISH_MODEL` names a
-model you have not pulled, every rewrite is skipped — with the one-time notice
-above.
+Every rewrite is a normal Gemini/Claude API or subscription call — it costs
+usage, and the message text is sent to Google (gemini backend) or Anthropic
+(claude backend).
 
 ---
 
 ## Install
 
-Directly from this repository (also serves its own marketplace):
+From the local checkout (serves as its own marketplace):
 
 ```shell
-/plugin marketplace add gvzdv/claudish-to-english
-/plugin install claudish-to-english@gvzdv-plugins
+/plugin marketplace add /Users/dawumnam/projects/claudish-to-english
+/plugin install claudish-to-english@dawumnam-plugins
 ```
 
-After review by the Anthropic team, the plugin will be available to install from the community marketplace:
+Or from the GitHub fork:
 
 ```shell
-/plugin marketplace add anthropics/claude-plugins-community
-/plugin install claudish-to-english@claude-community
+/plugin marketplace add dawumnam/claudish-to-english
+/plugin install claudish-to-english@dawumnam-plugins
 ```
 
 If the install summary says `Run /reload-plugins to activate.`, run that command.
@@ -83,7 +68,7 @@ If the install summary says `Run /reload-plugins to activate.`, run that command
 **Try before installing** (loads it for one session, no install):
 
 ```bash
-claude --plugin-dir /path/to/claudish-to-english
+claude --plugin-dir /Users/dawumnam/projects/claudish-to-english
 ```
 
 Run `/reload-plugins` after edits; if it doesn't load, check the `/plugin`
@@ -104,8 +89,8 @@ For a personal, all-projects setup, use `~/.claude/settings.json`:
 ```json
 {
   "env": {
-    "CLAUDISH_MODEL": "gemma4:26b-mlx",
-    "CLAUDISH_MODE": "append"
+    "CLAUDISH_GEMINI_MODEL": "gemini-3.6-flash",
+    "CLAUDISH_MODE": "replace"
   }
 }
 ```
@@ -126,7 +111,7 @@ things to know:
 Quick one-off without editing a file — hooks inherit the launching shell:
 
 ```bash
-CLAUDISH_MODEL=llama3.2:3b claude
+CLAUDISH_BACKEND=claude claude
 ```
 
 To confirm the hook is firing, set `CLAUDISH_DEBUG=1` and watch
@@ -146,8 +131,8 @@ message is known:
 ```
 chunk 0 (final:false) ─┐
 chunk 1 (final:false) ─┤ append each delta to $TMPDIR/claudish-to-english/<session>/<message>/<index>.part
-chunk 2 (final:false) ─┘  → emit nothing (append) or "" (replace)
-chunk 3 (final:true)  ──► reconstruct full message → call ollama once → show the rewrite
+chunk 2 (final:false) ─┘  → emit "" (replace) or nothing (append)
+chunk 3 (final:true)  ──► reconstruct full message → call the CLI once → show the rewrite
                           → delete the buffer
 ```
 
@@ -160,8 +145,8 @@ rewrites the assistant's message.
 
 | `CLAUDISH_MODE` | On screen | Notes |
 |---|---|---|
-| `append` (default) | Original streams normally, then a `💬 In plain English:` block is appended. | Safest. No streaming loss; if the LLM fails you just don't get the extra block. |
-| `replace` | Only the simplified version (original chunks suppressed while streaming). | Experimental. Appears all at once after LLM latency; on failure it re-shows the full original. |
+| `replace` (default) | Only the simplified version (original chunks suppressed while streaming). | Appears all at once after LLM latency; on failure it re-shows the full original. If the hook is hard-killed at its 60s `hooks.json` timeout, that message's original may be lost from the display (never from the transcript). |
+| `append` | Original streams normally, then a `💬 In plain English:` block is appended. | Safest. No streaming loss; if the LLM fails you just don't get the extra block. |
 
 ---
 
@@ -184,11 +169,10 @@ In both modes: YAML frontmatter is split off and re-attached **verbatim**, fence
 code is left to the model instruction, short files are skipped, and the write is
 atomic. Fail-open here means the file is left **exactly as the agent wrote it**.
 
-**Large files are slow.** `gemma4:26b-mlx` (the default) rewrites at roughly 60
-tokens/s, so a long plan or spec can take 30–120s. This hook allows up to
-`CLAUDISH_MD_TIMEOUT` (150s) inside a 180s `PostToolUse` hook budget; if a rewrite
-still times out you get the one-time notice above — raise those limits, or set
-`CLAUDISH_MODEL` to a smaller model.
+Long documents can be slow to rewrite. This hook allows up to
+`CLAUDISH_MD_TIMEOUT` (150s) inside a 180s `PostToolUse` hook budget; if a
+rewrite still times out you get the one-time notice above — raise those limits,
+or use a faster model.
 
 Enable it for one directory, in sibling mode (the safe default), the same way
 as every other setting — the `env` block of your `settings.json`:
@@ -212,45 +196,37 @@ frontmatter, so the frontmatter stays on line 1 where parsers expect it.
 | Var | Default | Meaning |
 |---|---|---|
 | `CLAUDISH_ENABLED` | `1` | Master switch. `0` = pass everything through. |
-| `CLAUDISH_BACKEND` | `ollama` | `ollama`, `claude`, or `gemini`. `claude` = headless `claude -p`; `gemini` = headless Gemini CLI. Neither needs ollama; both cost normal usage. |
+| `CLAUDISH_BACKEND` | `gemini` | `gemini` (headless Gemini CLI) or `claude` (headless `claude -p`). |
 | `CLAUDISH_GEMINI_MODEL` | `gemini-3.6-flash` | `gemini` backend only: model passed to the Gemini CLI (`-m`). |
 | `CLAUDISH_CLAUDE_MODEL` | *(unset)* | `claude` backend only: model passed to `claude -p`. Unset = the session's model if the hook payload carries one, else your CLI default. |
-| `CLAUDISH_MODE` | `append` | `append` or `replace` (display hook). |
-| `CLAUDISH_MODEL` | `gemma4:26b-mlx` | ollama model name. |
-| `CLAUDISH_OLLAMA` | `http://localhost:11434` | ollama base URL. |
+| `CLAUDISH_MODE` | `replace` | `replace` or `append` (display hook). |
 | `CLAUDISH_MIN_CHARS` | `200` | Skip messages/files whose prose (code stripped) is shorter than this. |
 | `CLAUDISH_STUB` | `0` | `1` = deterministic stub instead of the model (for testing display mechanics). |
-| `CLAUDISH_TIMEOUT` | `45` | LLM client timeout for the **display** hook (seconds). Keep it below that hook's `timeout` (60s). |
-| `CLAUDISH_MD_TIMEOUT` | `150` | LLM client timeout for the **Markdown file** hook (seconds). Higher on purpose — a large model rewriting a long doc is slow. Keep it below the `PostToolUse` hook `timeout` (180s). |
+| `CLAUDISH_TIMEOUT` | `45` | LLM client timeout for the **display** hook (seconds; needs GNU `timeout`/`gtimeout` on PATH, else the hook's own 60s ceiling applies). |
+| `CLAUDISH_MD_TIMEOUT` | `150` | LLM client timeout for the **Markdown file** hook (seconds). Higher on purpose — rewriting a long doc is slow. Keep it below the `PostToolUse` hook `timeout` (180s). |
 | `CLAUDISH_DEBUG` | `0` | `1` = write a debug log to `$TMPDIR/claudish-to-english/`. |
-| `CLAUDISH_NOTICE` | `1` | `1` = show a one-time, once-per-session notice when a rewrite is skipped because ollama is unreachable, the call timed out, or the model isn't pulled (display hook appends it on screen; Markdown hook uses a `systemMessage`). `0` = stay fully silent (pure fail-open). |
+| `CLAUDISH_NOTICE` | `1` | `1` = show a one-time, once-per-session notice when a rewrite is skipped because the CLI failed or timed out (display hook shows it on screen; Markdown hook uses a `systemMessage`). `0` = stay fully silent (pure fail-open). |
 | `CLAUDISH_MD_DIR` | *(unset)* | **Markdown hook opt-in.** Only `*.md` under this directory is rewritten. Unset = the Markdown hook does nothing. |
 | `CLAUDISH_MD_MODE` | `sibling` | `sibling` (`NAME.plain.md`) or `overwrite` (in place). |
 | `CLAUDISH_MD_SUFFIX` | `plain` | Sibling infix: `NAME.<suffix>.md`. |
 
 In `hooks/hooks.json` the display hook (`MessageDisplay`) has a 60s `timeout` and
 the Markdown hook (`PostToolUse`) has a 180s `timeout` — the file hook is higher
-because a large model rewriting a long document can take a couple of minutes.
+because rewriting a long document can take a couple of minutes.
 `CLAUDISH_TIMEOUT` and `CLAUDISH_MD_TIMEOUT` keep the LLM call itself bounded
 below those ceilings, so it fails open cleanly instead of being killed mid-write.
 
 **Quick kill switch:** set `CLAUDISH_ENABLED=0`, or disable the plugin.
 
-### Reasoning models
-
-The request sends `"think": false`. Models with a hidden reasoning phase
-otherwise spend most of their time generating reasoning tokens you never see —
-much slower for identical output quality on this simple task. Keep it off.
-
 ---
 
 ## Privacy / egress
 
-The rewriter runs **entirely locally** against ollama, so **no conversation
-content leaves your machine**. If you ever point `CLAUDISH_OLLAMA` at a
-remote/hosted endpoint, that context (which can include file contents from tool
-results) would be sent off-box — don't do that unless you understand and accept
-it.
+The rewriter calls a **hosted model**: each rewritten message (and, for the
+Markdown hook, file contents) is sent to Google (gemini backend) or Anthropic
+(claude backend). The claude backend sends text to Anthropic that was already
+part of your Claude conversation; the gemini backend sends it to a second
+provider — make sure that's acceptable for what you're working on.
 
 ---
 
