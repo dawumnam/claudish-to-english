@@ -26,6 +26,9 @@
 #
 # Config (env, with safe defaults):
 #   CLAUDISH_ENABLED   1|0            master switch shared with the display hook (default 1)
+#   CLAUDISH_BACKEND   ollama|claude  rewrite engine (default ollama); claude = headless
+#                                     `claude -p` (no ollama needed, costs Claude usage)
+#   CLAUDISH_CLAUDE_MODEL <model>     claude backend only: model for `claude -p`
 #   CLAUDISH_MD_DIR    <path>         REQUIRED opt-in. Only .md under here is rewritten.
 #                                     Relative paths resolve against the tool's cwd.
 #   CLAUDISH_MD_MODE   sibling|overwrite   (default sibling)
@@ -45,7 +48,12 @@
 # ---------------------------------------------------------------------------
 set -uo pipefail
 
+# Recursion guard: set on the `claude -p` child spawned by the claude backend
+# so its copy of this plugin's hooks stays inert.
+[ "${CLAUDISH_IN_REWRITE:-0}" = "1" ] && exit 0
+
 ENABLED="${CLAUDISH_ENABLED:-1}"
+BACKEND="${CLAUDISH_BACKEND:-ollama}"
 MD_DIR="${CLAUDISH_MD_DIR:-}"
 MD_MODE="${CLAUDISH_MD_MODE:-sibling}"
 MD_SUFFIX="${CLAUDISH_MD_SUFFIX:-plain}"
@@ -79,7 +87,11 @@ canon() (
 [ "$ENABLED" = "1" ]        || pass_through "disabled"
 [ -n "$MD_DIR" ]            || pass_through "no CLAUDISH_MD_DIR (feature off)"
 command -v jq   >/dev/null 2>&1 || pass_through "no jq"
-command -v curl >/dev/null 2>&1 || pass_through "no curl"
+if [ "$BACKEND" = "claude" ]; then
+  command -v claude >/dev/null 2>&1 || pass_through "no claude CLI"
+else
+  command -v curl >/dev/null 2>&1 || pass_through "no curl"
+fi
 
 payload="$(cat)"
 [ -n "$payload" ] || pass_through "empty payload"
@@ -157,15 +169,29 @@ if [ "$STUB" = "1" ]; then
   dbg "stub rewrite"
 else
   sys="You rewrite Markdown prose into much simpler, plain English. Keep every fact, name, number, link, and file path. Keep all Markdown structure — headings, lists, tables, and links. Do NOT change fenced code blocks or any YAML frontmatter; reproduce them exactly. Use short sentences and everyday words. Output ONLY the rewritten Markdown, with no preamble, labels, or commentary."
-  req="$(jq -n --arg m "$MODEL" --arg s "$sys" --arg u "$body" \
-        '{model:$m,stream:false,think:false,options:{temperature:0.3},messages:[{role:"system",content:$s},{role:"user",content:$u}]}' 2>/dev/null)"
-  [ -n "$req" ] || pass_through "req build failed"
-  resp="$(printf '%s' "$req" | curl -sS --max-time "$LLM_TIMEOUT" \
-          -H 'Content-Type: application/json' -X POST "$OLLAMA/api/chat" -d @- 2>/dev/null)"
-  curl_rc=$?
-  rewrite="$(printf '%s' "$resp" | jq -j '.message.content // empty' 2>/dev/null)"
-  err="$(printf '%s' "$resp" | jq -r '.error // empty' 2>/dev/null)"
-  dbg "ollama curl_rc=$curl_rc resp_bytes=${#resp} rewrite_bytes=${#rewrite} err=${err:-none}"
+  if [ "$BACKEND" = "claude" ]; then
+    cc_model="${CLAUDISH_CLAUDE_MODEL:-}"
+    [ -n "$cc_model" ] || cc_model="$(printf '%s' "$payload" | jq -r '.model // empty' 2>/dev/null)"
+    cc_args=(-p --tools "" --system-prompt "$sys")
+    [ -n "$cc_model" ] && cc_args+=(--model "$cc_model")
+    tmo=""
+    if command -v timeout >/dev/null 2>&1; then tmo="timeout $LLM_TIMEOUT"
+    elif command -v gtimeout >/dev/null 2>&1; then tmo="gtimeout $LLM_TIMEOUT"; fi
+    rewrite="$(printf '%s' "$body" | CLAUDISH_IN_REWRITE=1 CLAUDISH_ENABLED=0 \
+      $tmo claude "${cc_args[@]}" 2>/dev/null)"
+    curl_rc=$?
+    dbg "claude backend rc=$curl_rc model=${cc_model:-default} rewrite_bytes=${#rewrite}"
+  else
+    req="$(jq -n --arg m "$MODEL" --arg s "$sys" --arg u "$body" \
+          '{model:$m,stream:false,think:false,options:{temperature:0.3},messages:[{role:"system",content:$s},{role:"user",content:$u}]}' 2>/dev/null)"
+    [ -n "$req" ] || pass_through "req build failed"
+    resp="$(printf '%s' "$req" | curl -sS --max-time "$LLM_TIMEOUT" \
+            -H 'Content-Type: application/json' -X POST "$OLLAMA/api/chat" -d @- 2>/dev/null)"
+    curl_rc=$?
+    rewrite="$(printf '%s' "$resp" | jq -j '.message.content // empty' 2>/dev/null)"
+    err="$(printf '%s' "$resp" | jq -r '.error // empty' 2>/dev/null)"
+    dbg "ollama curl_rc=$curl_rc resp_bytes=${#resp} rewrite_bytes=${#rewrite} err=${err:-none}"
+  fi
 fi
 
 # Empty/failed rewrite -> fail open (file left exactly as the agent wrote it).
@@ -177,7 +203,13 @@ if [ -z "$rewrite" ]; then
   notified="$LOG_ROOT/$SID.md-notified"
   if [ "$NOTICE" = "1" ] && [ ! -e "$notified" ]; then
     why=""
-    if [ "$curl_rc" = "28" ]; then
+    if [ "$BACKEND" = "claude" ]; then
+      if [ "$curl_rc" = "124" ]; then
+        why="\`claude -p\` rewrite of $(basename "$file") timed out after ${LLM_TIMEOUT}s — raise CLAUDISH_MD_TIMEOUT (and the PostToolUse hook timeout in hooks.json). File left unchanged."
+      elif [ "$curl_rc" != "0" ]; then
+        why="\`claude -p\` failed (exit $curl_rc) while rewriting Markdown — file left unchanged. Try \`claude -p 'hi'\` in a terminal to check the CLI."
+      fi
+    elif [ "$curl_rc" = "28" ]; then
       why="rewrite of $(basename "$file") timed out after ${LLM_TIMEOUT}s — the model is too slow for a file this size. Raise CLAUDISH_MD_TIMEOUT (and the PostToolUse hook timeout in hooks.json), or set CLAUDISH_MODEL to a smaller model. File left unchanged."
     elif [ "$curl_rc" != "0" ]; then
       why="can't reach ollama at $OLLAMA — Markdown rewrite skipped, file left unchanged. Start it with \`ollama serve\`."

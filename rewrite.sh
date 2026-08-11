@@ -27,6 +27,12 @@
 # Config (all via env, with safe defaults):
 #   CLAUDISH_ENABLED   1|0            master switch (default 1)
 #   CLAUDISH_MODE      append|replace display strategy (default append)
+#   CLAUDISH_BACKEND   ollama|claude  rewrite engine (default ollama).
+#                                           claude = headless `claude -p` (no ollama
+#                                           needed; costs normal Claude usage)
+#   CLAUDISH_CLAUDE_MODEL <model>     claude backend only: model for `claude -p`.
+#                                           Unset = the payload's session model if
+#                                           present, else your CLI default model.
 #   CLAUDISH_MODEL     <ollama model> (default gemma4:26b-mlx)
 #   CLAUDISH_OLLAMA    <base url>     (default http://localhost:11434)
 #   CLAUDISH_MIN_CHARS <n>            skip messages shorter than this
@@ -42,8 +48,14 @@
 # ---------------------------------------------------------------------------
 set -uo pipefail
 
+# Recursion guard: when the claude backend shells out to `claude -p`, that
+# child session loads this plugin too. This var is set on the child so its
+# hooks exit immediately — without it every rewrite would spawn another.
+[ "${CLAUDISH_IN_REWRITE:-0}" = "1" ] && exit 0
+
 ENABLED="${CLAUDISH_ENABLED:-1}"
 MODE="${CLAUDISH_MODE:-append}"
+BACKEND="${CLAUDISH_BACKEND:-ollama}"
 MODEL="${CLAUDISH_MODEL:-gemma4:26b-mlx}"
 OLLAMA="${CLAUDISH_OLLAMA:-http://localhost:11434}"
 MIN_CHARS="${CLAUDISH_MIN_CHARS:-200}"
@@ -81,7 +93,11 @@ emit_empty() {
 
 [ "$ENABLED" = "1" ] || pass_through
 command -v jq  >/dev/null 2>&1 || pass_through
-command -v curl >/dev/null 2>&1 || pass_through
+if [ "$BACKEND" = "claude" ]; then
+  command -v claude >/dev/null 2>&1 || pass_through
+else
+  command -v curl >/dev/null 2>&1 || pass_through
+fi
 
 payload="$(cat)"
 [ -n "$payload" ] || pass_through
@@ -159,15 +175,35 @@ else
     dbg "context: userq_bytes=${#userq}"
   fi
 
-  req="$(jq -n --arg m "$MODEL" --arg s "$sys" --arg u "$full" \
-        '{model:$m,stream:false,think:false,options:{temperature:0.3},messages:[{role:"system",content:$s},{role:"user",content:$u}]}' 2>/dev/null)"
-  [ -n "$req" ] || { dbg "req build failed"; cleanup; [ "$MODE" = "replace" ] && { out="$mdir.orig"; printf '%s' "$full" > "$out" && emit "$out"; }; pass_through; }
-  resp="$(printf '%s' "$req" | curl -sS --max-time "$LLM_TIMEOUT" \
-          -H 'Content-Type: application/json' -X POST "$OLLAMA/api/chat" -d @- 2>/dev/null)"
-  curl_rc=$?
-  rewrite="$(printf '%s' "$resp" | jq -j '.message.content // empty' 2>/dev/null)"
-  err="$(printf '%s' "$resp" | jq -r '.error // empty' 2>/dev/null)"
-  dbg "ollama curl_rc=$curl_rc resp_bytes=${#resp} rewrite_bytes=${#rewrite} err=${err:-none}"
+  if [ "$BACKEND" = "claude" ]; then
+    # Headless Claude Code as the rewriter. --tools "" = no tool use, and the
+    # child gets CLAUDISH_IN_REWRITE=1 + CLAUDISH_ENABLED=0 so its own copy of
+    # this plugin (and both hooks) stays inert. Model: explicit override, else
+    # the session's model from the hook payload, else the CLI default.
+    cc_model="${CLAUDISH_CLAUDE_MODEL:-}"
+    [ -n "$cc_model" ] || cc_model="$(printf '%s' "$payload" | jq -r '.model // empty' 2>/dev/null)"
+    cc_args=(-p --tools "" --system-prompt "$sys")
+    [ -n "$cc_model" ] && cc_args+=(--model "$cc_model")
+    # `timeout` isn't stock on macOS; use it when present, else the hook's own
+    # timeout in hooks.json is the ceiling (still fail-open, append mode).
+    tmo=""
+    if command -v timeout >/dev/null 2>&1; then tmo="timeout $LLM_TIMEOUT"
+    elif command -v gtimeout >/dev/null 2>&1; then tmo="gtimeout $LLM_TIMEOUT"; fi
+    rewrite="$(printf '%s' "$full" | CLAUDISH_IN_REWRITE=1 CLAUDISH_ENABLED=0 \
+      $tmo claude "${cc_args[@]}" 2>/dev/null)"
+    curl_rc=$?
+    dbg "claude backend rc=$curl_rc model=${cc_model:-default} rewrite_bytes=${#rewrite}"
+  else
+    req="$(jq -n --arg m "$MODEL" --arg s "$sys" --arg u "$full" \
+          '{model:$m,stream:false,think:false,options:{temperature:0.3},messages:[{role:"system",content:$s},{role:"user",content:$u}]}' 2>/dev/null)"
+    [ -n "$req" ] || { dbg "req build failed"; cleanup; [ "$MODE" = "replace" ] && { out="$mdir.orig"; printf '%s' "$full" > "$out" && emit "$out"; }; pass_through; }
+    resp="$(printf '%s' "$req" | curl -sS --max-time "$LLM_TIMEOUT" \
+            -H 'Content-Type: application/json' -X POST "$OLLAMA/api/chat" -d @- 2>/dev/null)"
+    curl_rc=$?
+    rewrite="$(printf '%s' "$resp" | jq -j '.message.content // empty' 2>/dev/null)"
+    err="$(printf '%s' "$resp" | jq -r '.error // empty' 2>/dev/null)"
+    dbg "ollama curl_rc=$curl_rc resp_bytes=${#resp} rewrite_bytes=${#rewrite} err=${err:-none}"
+  fi
 fi
 
 # Empty/failed rewrite -> fail open (or re-show original in replace mode).
@@ -185,7 +221,13 @@ if [ -z "$rewrite" ]; then
   if [ "$NOTICE" = "1" ] && [ ! -e "$notified" ] && { [ "$curl_rc" != "0" ] || [ -n "${err:-}" ]; }; then
     : > "$notified" 2>/dev/null || true
     last_delta="$(cat "$final_part" 2>/dev/null)"
-    if [ "$curl_rc" = "28" ]; then
+    if [ "$BACKEND" = "claude" ]; then
+      if [ "$curl_rc" = "124" ]; then
+        why="the \`claude -p\` rewrite timed out after ${LLM_TIMEOUT}s — raise CLAUDISH_TIMEOUT (and the MessageDisplay timeout in hooks.json)"
+      else
+        why="\`claude -p\` failed (exit $curl_rc) — try \`claude -p 'hi'\` in a terminal to check the CLI works and you're logged in"
+      fi
+    elif [ "$curl_rc" = "28" ]; then
       why="the rewrite timed out after ${LLM_TIMEOUT}s (model too slow for this message) — raise CLAUDISH_TIMEOUT or set CLAUDISH_MODEL to a smaller model"
     elif [ "$curl_rc" != "0" ]; then
       why="can't reach ollama at $OLLAMA — start it with \`ollama serve\` (see the plugin README)"
