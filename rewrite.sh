@@ -38,7 +38,8 @@
 #                                           Unset = the payload's session model if
 #                                           present, else your CLI default model.
 #   CLAUDISH_MIN_CHARS <n>            skip messages shorter than this
-#                                           (prose, code stripped) (default 200)
+#                                           (prose, code stripped). Default 0 =
+#                                           rewrite every message.
 #   CLAUDISH_STUB      1|0            deterministic stub instead of the model
 #                                           (for display-mechanics testing)
 #   CLAUDISH_TIMEOUT   <seconds>      LLM client timeout (default 45)
@@ -57,7 +58,7 @@ set -uo pipefail
 ENABLED="${CLAUDISH_ENABLED:-1}"
 MODE="${CLAUDISH_MODE:-replace}"
 BACKEND="${CLAUDISH_BACKEND:-gemini}"
-MIN_CHARS="${CLAUDISH_MIN_CHARS:-200}"
+MIN_CHARS="${CLAUDISH_MIN_CHARS:-0}"
 STUB="${CLAUDISH_STUB:-0}"
 LLM_TIMEOUT="${CLAUDISH_TIMEOUT:-45}"
 DEBUG="${CLAUDISH_DEBUG:-0}"

@@ -200,7 +200,7 @@ frontmatter, so the frontmatter stays on line 1 where parsers expect it.
 | `CLAUDISH_GEMINI_MODEL` | `gemini-3.6-flash` | `gemini` backend only: model passed to the Gemini CLI (`-m`). |
 | `CLAUDISH_CLAUDE_MODEL` | *(unset)* | `claude` backend only: model passed to `claude -p`. Unset = the session's model if the hook payload carries one, else your CLI default. |
 | `CLAUDISH_MODE` | `replace` | `replace` or `append` (display hook). |
-| `CLAUDISH_MIN_CHARS` | `200` | Skip messages/files whose prose (code stripped) is shorter than this. |
+| `CLAUDISH_MIN_CHARS` | `0` (display) / `200` (Markdown hook) | Skip messages/files whose prose (code stripped) is shorter than this. The display hook defaults to `0` — every message is rewritten. |
 | `CLAUDISH_STUB` | `0` | `1` = deterministic stub instead of the model (for testing display mechanics). |
 | `CLAUDISH_TIMEOUT` | `45` | LLM client timeout for the **display** hook (seconds; needs GNU `timeout`/`gtimeout` on PATH, else the hook's own 60s ceiling applies). |
 | `CLAUDISH_MD_TIMEOUT` | `150` | LLM client timeout for the **Markdown file** hook (seconds). Higher on purpose — rewriting a long doc is slow. Keep it below the `PostToolUse` hook `timeout` (180s). |
