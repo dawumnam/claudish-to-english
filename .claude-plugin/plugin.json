@@ -1,7 +1,7 @@
 {
   "name": "claudish-to-english",
   "description": "Shows a plain-English rewrite of each Claude Code assistant message, produced by a headless CLI model (Gemini CLI or claude -p). Display-only: Claude's reasoning and the transcript keep the original text.",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "author": {
     "name": "Mike Gvozdev",
     "email": "mv.gvozdev@gmail.com",
