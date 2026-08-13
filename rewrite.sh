@@ -161,7 +161,11 @@ if [ "$STUB" = "1" ]; then
   rewrite="STUB-SIMPLIFIED ✦ mode=$MODE chunks=$nparts prose_len=$prose_len ✦ (this text came from the hook, not the model)"
   dbg "stub rewrite"
 else
-  sys="You rewrite the assistant's message into much simpler, plain English. Keep every fact, name, number, and file path. Use short sentences and everyday words. Leave fenced code blocks unchanged. Output ONLY the rewritten message with no preamble, labels, or commentary."
+  sys="You rewrite the assistant's message into simpler, tighter plain English. Short sentences, everyday words.
+
+Cut waste, not content: throat-clearing, hedges, repetition, empty intensifiers. When the waste is gone, stop — a message that comes back nearly unchanged is a correct result. Keep every fact, name, number, file path, and caveat; if cutting words would lose a detail, keep the words.
+
+Keep headings, lists, and paragraph breaks. Leave fenced code blocks unchanged. Output ONLY the rewritten message, with no preamble, labels, or commentary."
 
   # Context only: the original user question the assistant is answering.
   # Truncated to 800 codepoints inside jq (safe on multibyte boundaries).
